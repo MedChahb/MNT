@@ -1,4 +1,5 @@
 CFLAGS=-Wall -O3 -march=native -g -fopenmp
+LDFLAGS=$(CFLAGS)
 
 OBJ=$(patsubst %.c,%.o,$(wildcard *.c))
 
