@@ -2,17 +2,20 @@
 #include <stdlib.h>
 #include <mpi.h>
 #include "type.h"
-#include "darboux.h"
 #include "io.h"
+#include "darboux.h"
 #include "check.h"
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     int rank, size;
 
     // Initialize MPI
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    mnt *m = NULL, *d = NULL;
 
     if (argc < 2) {
         if (rank == 0) {
@@ -22,20 +25,18 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    mnt *m = NULL, *d = NULL;
-
-    // Read the input file on the master process (rank 0)
+    // Read input on rank 0
     if (rank == 0) {
         m = mnt_read(argv[1]);
     }
 
-    // Broadcast the dimensions and terrain data to all processes
+    // Broadcast dimensions and terrain to all processes
     int nrows = 0, ncols = 0;
     if (rank == 0) {
         nrows = m->nrows;
         ncols = m->ncols;
     }
-
+    
     // Broadcast the number of rows and columns
     MPI_Bcast(&nrows, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&ncols, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -44,23 +45,30 @@ int main(int argc, char **argv) {
         m = malloc(sizeof(mnt));
         m->nrows = nrows;
         m->ncols = ncols;
-        m->no_data = 0;
+        m->no_data = -9999;
         CHECK((m->terrain = malloc(nrows * ncols * sizeof(float))) != NULL);
     }
-    
-    // Broadcast terrain data to all processes
+
+    // Broadcast terrain data
     MPI_Bcast(m->terrain, nrows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-    // Perform the Darboux computation (all processes will work on this)
+    // Call darboux function
     d = darboux(m);
 
-    // Write output on the master process (rank 0)
+    // Write output on rank 0
     if (rank == 0) {
-        FILE *out = (argc == 3) ? fopen(argv[2], "w") : stdout;
+        FILE *out;
+        if (argc == 3) {
+            out = fopen(argv[2], "w");
+        } else {
+            out = stdout;
+        }
         mnt_write(d, out);
-        if (argc == 3) fclose(out);
+        if (argc == 3) {
+            fclose(out);
+        }
 
-        // Free memory on the master process
+        // Free memory
         free(m->terrain);
         free(m);
         free(d->terrain);

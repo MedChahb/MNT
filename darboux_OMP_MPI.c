@@ -148,38 +148,26 @@ mnt *darboux(const mnt *restrict m)
     int extra_rows = nrows % size;
     int local_rows = rows_per_proc + (rank < extra_rows ? 1 : 0);
 
-    // Allocate memory for local matrices, +2 for boundary rows
-    CHECK((W = malloc((local_rows + 2) * ncols * sizeof(float))) != NULL);
-    CHECK((Wprec = malloc((local_rows + 2) * ncols * sizeof(float))) != NULL);
+    // Allocate memory for local matrices
+    CHECK((W = malloc((local_rows + 2) * ncols * sizeof(float))) != NULL);   // +2 for boundary rows
+    Wprec = malloc((local_rows + 2) * ncols * sizeof(float));   // +2 for boundary rows
+    if (!Wprec) {
+        fprintf(stderr, "Process %d: Memory allocation failed for Wprec\n", rank);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
-    // Initialize Wprec (including boundary rows)
+    // Initialize Wprec locally (including boundary rows)
     for (int i = 0; i < (local_rows + 2) * ncols; i++) {
-        Wprec[i] = 0.0f; // Initialize Wprec to zeros
+        Wprec[i] = 0.0f;
     }
 
-    // Set boundary rows from terrain
-    for (int j = 0; j < ncols; j++) {
-        if (rank == 0) {
-            Wprec[j] = TERRAIN(m, 0, j);  // Top boundary
-        }
-        if (rank == size - 1) {
-            Wprec[(local_rows + 1) * ncols + j] = TERRAIN(m, nrows - 1, j);  // Bottom boundary
-        }
-    }
-
-    // Iteration flag and counter
     int modif = 1;
     int iter = 0;
     while (modif) {
         modif = 0;
         iter++;
 
-        // Debug: Print iteration progress
-        if (rank == 0 && iter % 10 == 0) {
-            printf("Iteration %d, modif = %d\n", iter, modif);
-        }
-
-        // MPI communication: Exchange boundary data
+        // Simplified communication using blocking MPI_Sendrecv
         MPI_Status status;
         if (rank > 0) {
             // Send the first row and receive the last row from the previous process
@@ -194,17 +182,15 @@ mnt *darboux(const mnt *restrict m)
                          MPI_COMM_WORLD, &status);  // Receive into the last row
         }
 
-        // Update W using the neighboring cells
+        // Update W based on Wprec using OpenMP and calcul_Wij()
         #pragma omp parallel for reduction(|:modif) schedule(dynamic)
-        for (int i = 1; i < local_rows + 1; i++) {  // Use local rows + boundary rows
+        for (int i = 1; i < local_rows + 1; i++) {   // Use local rows + boundary rows
             for (int j = 0; j < ncols; j++) {
-                // Check if the new value is different from the old one
-                int new_value = calcul_Wij(W, Wprec, m, i, j);  // Returns 1 if modification occurs
-                modif |= new_value;
+                modif |= calcul_Wij(W, Wprec, m, i, j);;  // Set modif to 1 if any change occurred
             }
         }
 
-        // Reduce across all processes to check for global modifications
+        // Check for global termination
         int global_modif = 0;
         MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
         modif = global_modif;
@@ -220,7 +206,6 @@ mnt *darboux(const mnt *restrict m)
         float *final_result = malloc(nrows * ncols * sizeof(float));
         CHECK(final_result != NULL);
         memcpy(final_result, Wprec + ncols, local_rows * ncols * sizeof(float)); // Skip boundary rows
-
         for (int p = 1; p < size; p++) {
             int recv_rows = rows_per_proc + (p < extra_rows ? 1 : 0);
             int offset = (p * rows_per_proc + (p < extra_rows ? p : extra_rows)) * ncols;
