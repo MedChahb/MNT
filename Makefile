@@ -1,42 +1,54 @@
-CFLAGS=-Wall -O3 -march=native -g
-OMP_CFLAGS=$(CFLAGS) -fopenmp
-LDFLAGS=$(CFLAGS)
-OMP_LDFLAGS=$(OMP_CFLAGS)
+CC = gcc
+MPICC = mpicc
+CFLAGS = -Wall -O3 -march=native -g
+OMPFLAGS = -fopenmp
 
-# Define the source files for each version
-SEQ_SRC=$(filter-out darboux_OMP.c, $(wildcard *.c))
-OMP_SRC=$(filter-out darboux.c, $(wildcard *.c))
+# Targets
+all: main main_OMP main_OMP_MPI clean_obj
 
-# Define object files for each version
-SEQ_OBJ=$(SEQ_SRC:.c=.o)
-OMP_OBJ=$(OMP_SRC:.c=.omp.o)
+main: io.o main.o darboux.o
+	$(CC) $(CFLAGS) -o main darboux.o io.o main.o
 
-all: main main_OMP
+main_OMP: darboux_OMP.o io_omp.o main_omp.o
+	$(CC) $(CFLAGS) $(OMPFLAGS) -o main_OMP darboux_OMP.o io_omp.o main_omp.o
 
-# Sequential version
-main: $(SEQ_OBJ)
-	$(CC) $(LDFLAGS) -o $@ $(SEQ_OBJ)
+main_OMP_MPI: darboux_OMP_MPI.o io_mpi.o main_mpi.o
+	$(MPICC) $(CFLAGS) $(OMPFLAGS) -o main_OMP_MPI darboux_OMP_MPI.o io_mpi.o main_mpi.o
 
-# Parallel version with OpenMP
-main_OMP: $(OMP_OBJ)
-	$(CC) $(OMP_LDFLAGS) -o $@ $(OMP_OBJ)
+# Object files
+io.o: io.c io.h check.h type.h
+	$(CC) $(CFLAGS) -c io.c -o io.o
 
-# Compile .o files for the sequential version
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+main.o: main.c io.h check.h type.h
+	$(CC) $(CFLAGS) -c main.c -o main.o
 
-# Compile .omp.o files for the OpenMP version
-%.omp.o: %.c
-	$(CC) $(OMP_CFLAGS) -c $< -o $@
+darboux.o: darboux.c darboux.h
+	$(CC) $(CFLAGS) -c darboux.c -o darboux.o
 
-clean:
-	rm -f $(SEQ_OBJ) $(OMP_OBJ) main main_OMP
+darboux_OMP.o: darboux_OMP.c darboux.h
+	$(CC) $(CFLAGS) $(OMPFLAGS) -c darboux_OMP.c -o darboux_OMP.o
 
-test: main
-	./main input/mini.mnt
+main_omp.o: main.c io.h check.h type.h
+	$(CC) $(CFLAGS) $(OMPFLAGS) -c main.c -o main_omp.o
 
-test_OMP: main_OMP
-	./main_OMP input/mini.mnt
+io_omp.o: io.c io.h check.h type.h
+	$(CC) $(CFLAGS) $(OMPFLAGS) -c io.c -o io_omp.o
 
-# Recompile objects if headers or Makefile change
-$(SEQ_OBJ) $(OMP_OBJ): $(wildcard *.h) Makefile
+darboux_OMP_MPI.o: darboux_OMP_MPI.c darboux.h
+	$(MPICC) $(CFLAGS) $(OMPFLAGS) -c darboux_OMP_MPI.c -o darboux_OMP_MPI.o
+
+main_mpi.o: main_MPI.c io.h check.h type.h
+	$(MPICC) $(CFLAGS) $(OMPFLAGS) -c main_MPI.c -o main_mpi.o
+
+io_mpi.o: io.c io.h check.h type.h
+	$(MPICC) $(CFLAGS) $(OMPFLAGS) -c io.c -o io_mpi.o
+
+# Clean
+clean_obj:
+	rm -f *.o
+
+clean_exe : 
+	rm main main_OMP main_OMP_MPI
+
+clean_all : 
+	rm -f *.o main main_OMP main_OMP_MPI
