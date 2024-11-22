@@ -1,6 +1,6 @@
 #include <string.h>
 #include <omp.h>
-#include <mpi.h> // Required for MPI functions
+#include <mpi.h>
 #include "check.h"
 #include "type.h"
 #include "darboux.h"
@@ -134,108 +134,111 @@ int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, con
 // applique l'algorithme de Darboux sur le MNT m, pour calculer un nouveau MNT
 mnt *darboux(const mnt *restrict m)
 {
-  // MPI setup
-  int rank, size;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  MPI_Comm_size(MPI_COMM_WORLD, &size);
+    const int ncols = m->ncols, nrows = m->nrows;
+    float *restrict W, *restrict Wprec;
 
-  const int ncols = m->ncols, nrows = m->nrows;
+    int rank, size;
 
-  // Start timing for the entire function
-  double start_total_time = omp_get_wtime();
+    // Get MPI rank and size
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-  // Initialize rows per process
-  int rows_per_process = nrows / size;
-  int extra_rows = nrows % size; // Handle extra rows
-  int start_row = rank * rows_per_process + (rank < extra_rows ? rank : extra_rows);
-  int num_rows = rows_per_process + (rank < extra_rows ? 1 : 0);
+    // Divide rows among processes
+    int rows_per_proc = nrows / size;
+    int extra_rows = nrows % size;
+    int local_rows = rows_per_proc + (rank < extra_rows ? 1 : 0);
 
-  // Allocate local W and Wprec
-  float *local_W = malloc((num_rows + 2) * ncols * sizeof(float));  // +2 for ghost rows
-  float *local_Wprec = malloc((num_rows + 2) * ncols * sizeof(float));
-  CHECK(local_W != NULL && local_Wprec != NULL);
+    // Allocate memory for local matrices, +2 for boundary rows
+    CHECK((W = malloc((local_rows + 2) * ncols * sizeof(float))) != NULL);
+    CHECK((Wprec = malloc((local_rows + 2) * ncols * sizeof(float))) != NULL);
 
-  // Initialize Wprec locally
-  for (int i = 0; i < num_rows; i++)
-  {
-    for (int j = 0; j < ncols; j++)
-    {
-      int global_row = start_row + i;
-      WTERRAIN(local_Wprec, i + 1, j) = (global_row == 0 || global_row == nrows - 1 || j == 0 || j == ncols - 1 || TERRAIN(m, global_row, j) == m->no_data)
-                                            ? TERRAIN(m, global_row, j)
-                                            : max_terrain(m) + 10.0;
-    }
-  }
-
-  int modif = 1, global_modif;
-
-  // Main calculation loop
-  while (modif)
-  {
-    modif = 0;
-
-    // Share ghost rows with neighbors
-    if (rank > 0) // Send top row to above neighbor
-      MPI_Send(local_Wprec + ncols, ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
-    if (rank < size - 1) // Send bottom row to below neighbor
-      MPI_Send(local_Wprec + num_rows * ncols, ncols, MPI_FLOAT, rank + 1, 1, MPI_COMM_WORLD);
-    if (rank > 0) // Receive top ghost row
-      MPI_Recv(local_Wprec, ncols, MPI_FLOAT, rank - 1, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    if (rank < size - 1) // Receive bottom ghost row
-      MPI_Recv(local_Wprec + (num_rows + 1) * ncols, ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-    // Compute new W
-    #pragma omp parallel for reduction(|:modif) schedule(dynamic) // Keep existing OpenMP parallelization
-    for (int i = 1; i <= num_rows; i++) // Exclude ghost rows
-    {
-      for (int j = 0; j < ncols; j++)
-      {
-        modif |= calcul_Wij(local_W, local_Wprec, m, start_row + i - 1, j);
-      }
+    // Initialize Wprec (including boundary rows)
+    for (int i = 0; i < (local_rows + 2) * ncols; i++) {
+        Wprec[i] = 0.0f; // Initialize Wprec to zeros
     }
 
-    // Swap W and Wprec
-    float *tmp = local_W;
-    local_W = local_Wprec;
-    local_Wprec = tmp;
+    // Set boundary rows from terrain
+    for (int j = 0; j < ncols; j++) {
+        if (rank == 0) {
+            Wprec[j] = TERRAIN(m, 0, j);  // Top boundary
+        }
+        if (rank == size - 1) {
+            Wprec[(local_rows + 1) * ncols + j] = TERRAIN(m, nrows - 1, j);  // Bottom boundary
+        }
+    }
 
-    // Reduce across all processes to check if we need another iteration
-    MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
-    modif = global_modif;
-  }
+    // Iteration flag and counter
+    int modif = 1;
+    int iter = 0;
+    while (modif) {
+        modif = 0;
+        iter++;
 
-  // Gather results back to root
-  float *global_W = NULL;
-  if (rank == 0)
-    global_W = malloc(nrows * ncols * sizeof(float));
+        // Debug: Print iteration progress
+        if (rank == 0 && iter % 10 == 0) {
+            printf("Iteration %d, modif = %d\n", iter, modif);
+        }
 
-  MPI_Gather(local_Wprec + ncols, num_rows * ncols, MPI_FLOAT, global_W, num_rows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
+        // MPI communication: Exchange boundary data
+        MPI_Status status;
+        if (rank > 0) {
+            // Send the first row and receive the last row from the previous process
+            MPI_Sendrecv(&Wprec[ncols], ncols, MPI_FLOAT, rank - 1, 0,
+                         &Wprec[0], ncols, MPI_FLOAT, rank - 1, 0,
+                         MPI_COMM_WORLD, &status);  // Receive into the first row
+        }
+        if (rank < size - 1) {
+            // Send the last row and receive the first row from the next process
+            MPI_Sendrecv(&Wprec[(local_rows) * ncols], ncols, MPI_FLOAT, rank + 1, 0,
+                         &Wprec[(local_rows + 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0,
+                         MPI_COMM_WORLD, &status);  // Receive into the last row
+        }
 
-  // Create result structure
-  mnt *res = NULL;
-  if (rank == 0)
-  {
-    res = malloc(sizeof(*res));
-    memcpy(res, m, sizeof(*res));
-    res->terrain = global_W;
-  }
+        // Update W using the neighboring cells
+        #pragma omp parallel for reduction(|:modif) schedule(dynamic)
+        for (int i = 1; i < local_rows + 1; i++) {  // Use local rows + boundary rows
+            for (int j = 0; j < ncols; j++) {
+                // Check if the new value is different from the old one
+                int new_value = calcul_Wij(W, Wprec, m, i, j);  // Returns 1 if modification occurs
+                modif |= new_value;
+            }
+        }
 
-  // End timing for the entire function
-  double end_total_time = omp_get_wtime();
+        // Reduce across all processes to check for global modifications
+        int global_modif = 0;
+        MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+        modif = global_modif;
 
-  // Print thread times and total execution time
-  #ifdef DARBOUX_PPRINT
-  for (int i = 0; i < omp_get_max_threads(); i++)
-  {
-    printf("Thread %d execution time: %.6f seconds\n", i, 0.0); // Example, can accumulate individual thread times if needed
-  }
-  #endif
+        // Swap pointers for next iteration
+        float *tmp = W;
+        W = Wprec;
+        Wprec = tmp;
+    }
 
-  printf("Total execution time: %.6f seconds\n", end_total_time - start_total_time);
+    // Gather results at the master process
+    if (rank == 0) {
+        float *final_result = malloc(nrows * ncols * sizeof(float));
+        CHECK(final_result != NULL);
+        memcpy(final_result, Wprec + ncols, local_rows * ncols * sizeof(float)); // Skip boundary rows
 
-  // Cleanup
-  free(local_W);
-  free(local_Wprec);
+        for (int p = 1; p < size; p++) {
+            int recv_rows = rows_per_proc + (p < extra_rows ? 1 : 0);
+            int offset = (p * rows_per_proc + (p < extra_rows ? p : extra_rows)) * ncols;
+            MPI_Recv(&final_result[offset], recv_rows * ncols, MPI_FLOAT, p, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        free(W);
+        W = final_result;
+    } else {
+        MPI_Send(Wprec + ncols, local_rows * ncols, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);  // Skip boundary rows
+    }
 
-  return res;
+    // Free local resources
+    free(Wprec);
+    mnt *res = NULL;
+    if (rank == 0) {
+        CHECK((res = malloc(sizeof(*res))) != NULL);
+        memcpy(res, m, sizeof(*res));
+        res->terrain = W;
+    }
+    return res;
 }
