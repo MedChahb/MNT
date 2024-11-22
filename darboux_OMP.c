@@ -1,7 +1,7 @@
 // fonction de calcul principale : algorithme de Darboux
 // (remplissage des cuvettes d'un MNT)
 #include <string.h>
-
+#include <omp.h>
 #include "check.h"
 #include "type.h"
 #include "darboux.h"
@@ -135,7 +135,12 @@ int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, con
 // applique l'algorithme de Darboux sur le MNT m, pour calculer un nouveau MNT
 mnt *darboux(const mnt *restrict m)
 {
+  //omp_set_num_threads(4); // for tests
+  
   const int ncols = m->ncols, nrows = m->nrows;
+
+  // Start timing for the entire function
+  double start_total_time = omp_get_wtime();
 
   // initialisation
   float *restrict W, *restrict Wprec;
@@ -144,22 +149,34 @@ mnt *darboux(const mnt *restrict m)
 
   // calcul : boucle principale
   int modif = 1;
+
+  // Allocate an array to store time for each thread
+  int max_threads = omp_get_max_threads();
+  double *thread_times = calloc(max_threads, sizeof(double));
+  CHECK(thread_times != NULL);
+
   while(modif)
   {
     modif = 0; // sera mis à 1 s'il y a une modification
 
     // calcule le nouveau W fonction de l'ancien (Wprec) en chaque point [i,j]
-
-    // #pragma omp parallel for reduction(|:modif) collapse(2) // 1min 1sec
-    #pragma omp parallel for reduction(|:modif) schedule(guided, 4) // 57sec
-    for(int i=0; i<nrows; i++)
+    #pragma omp parallel for reduction(|:modif) schedule(dynamic) // Total execution time: 38.379788 seconds | 35.250776 for each thread (dynamic)
+    for(int i = 0; i < nrows; i++)
     {
-      for(int j=0; j<ncols; j++)
+      // Start timing for each thread
+      int thread_id = omp_get_thread_num();
+      double start_time = omp_get_wtime();
+
+      for(int j = 0; j < ncols; j++)
       {
         // calcule la nouvelle valeur de W[i,j]
         // en utilisant les 8 voisins de la position [i,j] du tableau Wprec
         modif |= calcul_Wij(W, Wprec, m, i, j);
       }
+
+      // Stop timing and accumulate time
+      double end_time = omp_get_wtime();
+      thread_times[thread_id] += (end_time - start_time);
     }
 
     #ifdef DARBOUX_PPRINT
@@ -174,6 +191,20 @@ mnt *darboux(const mnt *restrict m)
   }
   // fin du while principal
 
+  // End timing for the entire function
+  double end_total_time = omp_get_wtime();
+
+  // Print thread times
+  for (int i = 0; i < max_threads; i++)
+  {
+    printf("Thread %d execution time: %.4f seconds\n", i, thread_times[i]);
+  }
+  
+  // Print total execution time
+  printf("Total execution time: %.4f seconds\n", end_total_time - start_total_time);
+
+  // Cleanup
+  free(thread_times);
 
   // fin du calcul, le résultat se trouve dans W
   free(Wprec);
