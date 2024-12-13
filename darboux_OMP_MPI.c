@@ -142,9 +142,14 @@ mnt *darboux(const mnt *restrict m) {
     MPI_Bcast(Wprec, ncols * nrows, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
     int modif = 1;
-    int chunk_size = (nrows / size);
+    int chunk_size = (int)((nrows / size));
     int start = rank * chunk_size;
-    int end = (rank == size - 1) ? nrows : start + chunk_size;
+    int end;
+    if (rank == size - 1) {
+        end = nrows;
+    } else {
+        end = start + chunk_size;
+    }
 
     while (modif) {
         modif = 0; // sera mis à 1 s'il y a une modification
@@ -157,30 +162,26 @@ mnt *darboux(const mnt *restrict m) {
         }
 
         // Gestion des échanges de frontières
-        MPI_Request requests[4];
-        int req_count = 0;
-
         if (rank % 2 == 0) {
             if (rank + 1 < size) {
-                MPI_Isend(&W[(end - 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
-                MPI_Irecv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
+                MPI_Ssend(&W[(end - 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+                MPI_Recv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
             if (rank - 1 >= 0) {
-                MPI_Isend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
-                MPI_Irecv(&W[(start - 1) * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
+                MPI_Ssend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+                MPI_Recv(&W[(start - 1) * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
         } else {
             if (rank - 1 >= 0) {
-                MPI_Irecv(&W[(start - 1) * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
-                MPI_Isend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
+                MPI_Recv(&W[(start - 1) * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Ssend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
             }
+
             if (rank + 1 < size) {
-                MPI_Irecv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
-                MPI_Isend(&W[(end - 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
+                MPI_Recv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Ssend(&W[(end - 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
             }
         }
-
-        MPI_Waitall(req_count, requests, MPI_STATUSES_IGNORE);
 
         #ifdef DARBOUX_PPRINT
         if (rank == 0) {
@@ -194,17 +195,20 @@ mnt *darboux(const mnt *restrict m) {
 
         int global_modif = 0;
         MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
-        modif = global_modif;
+        modif |= global_modif;
     }
 
     if (rank == 0) {
         for (int i = 1; i < size; i++) {
-            int recv_start = i * chunk_size;
-            int recv_end = (i == size - 1) ? nrows : recv_start + chunk_size;
-            MPI_Recv(W + recv_start * ncols, (recv_end - recv_start) * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (i != size - 1) {
+                MPI_Recv(W + (i * chunk_size) * ncols, chunk_size * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            if (i == size - 1) {
+                MPI_Recv(W + (i * chunk_size) * ncols, nrows * ncols - (i * chunk_size) * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
         }
     } else {
-        MPI_Send(W + start * ncols, (end - start) * ncols, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+        MPI_Send(W + (rank * chunk_size) * ncols, end * ncols - start * ncols, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
     }
 
     free(Wprec);
