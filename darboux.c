@@ -11,6 +11,7 @@
 
 #ifdef MPI
 #include "mpi.h"
+#include <omp.h>
 #endif
 
 // si ce define n'est pas commenté, l'exécution affiche sur stderr la hauteur
