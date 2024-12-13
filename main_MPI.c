@@ -1,60 +1,104 @@
-// programme principal
 #include <stdio.h>
 #include <stdlib.h>
-#include <omp.h>
 #include <mpi.h>
 #include "type.h"
 #include "io.h"
 #include "darboux.h"
+#include "check.h"
 
 int main(int argc, char **argv)
 {
-  int rank;
-  MPI_Init(&argc, &argv);
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  mnt *m, *d;
+    int rank, size;
 
-  if(argc < 2)
-  {
-    fprintf(stderr, "Usage: %s <input filename> [<output filename>]\n", argv[0]);
-    exit(1);
-  }
+    // Initialize MPI
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-  // READ INPUT
-  m = mnt_read(argv[1]);
+    mnt *m = NULL, *d = NULL;
 
-  double t1 = omp_get_wtime();
-  
+    if (argc < 2) {
+        if (rank == 0) {
+            fprintf(stderr, "Usage: %s <input filename> [<output filename>]\n", argv[0]);
+        }
+        MPI_Finalize();
+        exit(1);
+    }
 
-  // COMPUTE
-  d = darboux(m);
+    // Read input only on rank 0
+    if (rank == 0) {
+        m = mnt_read(argv[1]);
+    }
 
-  double t2 = omp_get_wtime();
- if (rank == 0){
-  // WRITE OUTPUT
-  FILE *out;
-  if(argc == 3)
-    out = fopen(argv[2], "w");
-  else
-    out = stdout;
-  mnt_write(d, out);
-  if(argc == 3)
-    fclose(out);
-  else
-    mnt_write_lakes(m, d, stdout);
-  }
+    // Broadcast dimensions
+    int nrows = 0, ncols = 0;
+    float xllcorner = 0, yllcorner = 0, cellsize = 0, no_data = 0;
+    
+    if (rank == 0) {
+        nrows = m->nrows;
+        ncols = m->ncols;
+        xllcorner = m->xllcorner;
+        yllcorner = m->yllcorner;
+        cellsize = m->cellsize;
+        no_data = m->no_data;
+    }
 
+    // Broadcast metadata
+    MPI_Bcast(&nrows, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&ncols, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&xllcorner, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&yllcorner, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&cellsize, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&no_data, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-  double t3 = omp_get_wtime();
-  // free
-  free(m->terrain);
-  free(m);
-  free(d->terrain);
-  free(d);
+    // Allocate terrain for all processes
+    if (rank != 0) {
+        m = malloc(sizeof(mnt));
+        m->nrows = nrows;
+        m->ncols = ncols;
+        m->xllcorner = xllcorner;
+        m->yllcorner = yllcorner;
+        m->cellsize = cellsize;
+        m->no_data = no_data;
+        CHECK((m->terrain = malloc(nrows * ncols * sizeof(float))) != NULL);
+    }
 
-  if(rank == 0){
-    printf("\nCompute: %lfs, Savefile: %lf\n", t2-t1, t3-t2);
-  }
-   MPI_Finalize();
-  return(0);
+    // Broadcast terrain data
+    MPI_Bcast(m->terrain, nrows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+    // Call Darboux algorithm
+    d = darboux(m);
+
+    // Write output only on rank 0
+    if (rank == 0) {
+        FILE *out;
+        if (argc == 3) {
+            out = fopen(argv[2], "w");
+        } else {
+            out = stdout;
+        }
+        
+        mnt_write(d, out);
+        
+        if (argc == 3) {
+            fclose(out);
+        } else {
+            mnt_write_lakes(m, d, stdout);
+        }
+    }
+
+    // Free memory
+    if (rank == 0) {
+        free(m->terrain);
+        free(m);
+        free(d->terrain);
+        free(d);
+    } else {
+        free(m->terrain);
+        free(m);
+    }
+
+    // Finalize MPI
+    MPI_Finalize();
+    return 0;
 }
