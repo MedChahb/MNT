@@ -47,5 +47,5 @@ clean_obj:
 clean_exe: 
 	rm -f main main_OMP main_OMP_MPI
 
-clean_all: 
+clean: 
 	rm -f *.o main main_OMP main_OMP_MPI text_*
