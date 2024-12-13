@@ -167,6 +167,10 @@ mnt *darboux(const mnt *restrict m) {
             }
         }
 
+        #ifdef DARBOUX_PPRINT
+        dpprint();
+        #endif
+
         MPI_Allreduce(&local_modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 
         float *tmp = W;

@@ -51,4 +51,4 @@ clean_exe :
 	rm main main_OMP main_OMP_MPI
 
 clean_all : 
-	rm -f *.o main main_OMP main_OMP_MPI
+	rm -f *.o main main_OMP main_OMP_MPI text_*
