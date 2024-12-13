@@ -217,37 +217,40 @@ mnt *darboux(const mnt *restrict m)
   int blockSize = nrows / size;
   int start = rank * blockSize;
   int end = (rank == size - 1)? nrows : start + blockSize;
-  #else
+  #elif defined(OMP)
   int start = 0;
   int end = nrows;
   #endif
 
   while (modif) {
-    modif = 0;
+      modif = 0;
 
-    #if defined(OMP) || defined(MPI)
-    #pragma omp parallel reduction(|:modif)
-    #endif
-    {
-        #if defined(OMP) || defined(MPI)
-        int tid = omp_get_thread_num();
-        double thread_start = omp_get_wtime();
-        #endif
+      #if defined(OMP) || defined(MPI)
+      int tid;
+      double thread_start;
+      #pragma omp parallel private(tid, thread_start)
+      {
+          tid = omp_get_thread_num();
+          thread_start = omp_get_wtime();
 
-        #if defined(OMP) || defined(MPI)
-        #pragma omp for schedule(dynamic)
-        #endif
-        for (int i = start; i < end; i++) {
-          for (int j = 0; j < ncols; j++) {
-            modif |= calcul_Wij(W, Wprec, m, i, j);
+          #pragma omp for reduction(|:modif) schedule(dynamic)
+          for (int i = start; i < end; i++) {
+              for (int j = 0; j < ncols; j++) {
+                  modif |= calcul_Wij(W, Wprec, m, i, j);
+              }
           }
-        }
-
-        #if defined(OMP) || defined(MPI)
-        double thread_end = omp_get_wtime();
-        thread_timings[tid].time += thread_end - thread_start;
-        #endif
-    }
+          
+          double thread_end = omp_get_wtime();
+          thread_timings[tid].time += thread_end - thread_start;
+      }
+      #else
+      // Sequential version
+      for (int i = 0; i < nrows; i++) {
+          for (int j = 0; j < ncols; j++) {
+              modif |= calcul_Wij(W, Wprec, m, i, j);
+          }
+      }
+      #endif
 
     #ifdef MPI
     exchange_boundaries(W, start, end, ncols, rank, size);
