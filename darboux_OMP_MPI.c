@@ -230,4 +230,4 @@ mnt *darboux(const mnt *restrict m )
   memcpy(res, m, sizeof(*res));
   res->terrain = W;
   return(res);
-}
+} 
