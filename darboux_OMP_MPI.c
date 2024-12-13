@@ -1,191 +1,169 @@
+// fonction de calcul principale : algorithme de Darboux
+// (remplissage des cuvettes d'un MNT)
 #include <string.h>
 #include <omp.h>
-#include <mpi.h>
+#include "mpi.h"
 #include "check.h"
 #include "type.h"
 #include "darboux.h"
 
-static const int VOISINS[8][2] = {{-1,-1}, {-1,0}, {-1,1}, {0,-1}, {0,1}, {1,-1}, {1,0}, {1,1}};
+// si ce define n'est pas commenté, l'exécution affiche sur stderr la hauteur
+// courante en train d'être calculée (doit augmenter) et l'itération du calcul
+#define DARBOUX_PPRINT
 
-static void calculate_band_size(int rank, int size, int total_rows, int *start_row, int *num_rows) {
-    int base_rows = total_rows / size;
-    int extra = total_rows % size;
-    
-    if (rank < extra) {
-        *num_rows = base_rows + 1;
-        *start_row = rank * (*num_rows);
-    } else {
-        *num_rows = base_rows;
-        *start_row = extra * (base_rows + 1) + (rank - extra) * base_rows;
-    }
-}
+#define PRECISION_FLOTTANT 1.e-5
 
+// pour accéder à un tableau de flotant linéarisé (ncols doit être défini) :
+#define WTERRAIN(w,i,j) (w[(i)*ncols+(j)])
 
-
-static int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, 
-                     const int i, const int j, const float *top_recv, const float *bottom_recv,
-                     int start_row, int num_rows, int rank, int size)
+// calcule la valeur max de hauteur sur un terrain
+float max_terrain(const mnt *restrict m)
 {
-    const int ncols = m->ncols;
-    int modif = 0;
-    int local_i = i - start_row;
-    
-    // Utiliser la même macro que dans type.h
-    float current = Wprec[local_i * ncols + j];
-    float terrain_val = TERRAIN(m, i, j);
-    
-    W[local_i * ncols + j] = current;
-
-    if(current > terrain_val) {
-        for(int v = 0; v < 8; v++) {
-            int n1 = i + VOISINS[v][0];
-            int n2 = j + VOISINS[v][1];
-            
-            if(n2 < 0 || n2 >= ncols || n1 < 0 || n1 >= m->nrows)
-                continue;
-
-            float neighbor_val;
-            
-            if(n1 < start_row && rank > 0) {
-                if(top_recv == NULL) continue;
-                neighbor_val = top_recv[n2];
-            }
-            else if(n1 >= start_row + num_rows && rank < size - 1) {
-                if(bottom_recv == NULL) continue;
-                neighbor_val = bottom_recv[n2];
-            }
-            else if(n1 >= start_row && n1 < start_row + num_rows) {
-                neighbor_val = Wprec[(n1 - start_row) * ncols + n2];
-            }
-            else {
-                continue;
-            }
-
-            if(neighbor_val == m->no_data)
-                continue;
-
-            const float Wn = neighbor_val + EPSILON;
-            if(terrain_val >= Wn) {
-                W[local_i * ncols + j] = terrain_val;
-                modif = 1;
-            }
-            else if(current > Wn) {
-                W[local_i * ncols + j] = Wn;
-                modif = 1;
-            }
-        }
-    }
-    return modif;
+  float max = m->terrain[0];
+  for(int i = 0 ; i < m->ncols * m->nrows ; i++)
+    if(m->terrain[i] > max)
+      max = m->terrain[i];
+  return(max);
 }
 
-static float max_terrain_band(const mnt *m, int start_row, int num_rows) {
-    float max_val = TERRAIN(m, start_row, 0);
-    
-    #pragma omp parallel reduction(max:max_val)
+// initialise le tableau W de départ à partir d'un mnt m
+float *init_W(const mnt *restrict m)
+{
+  const int ncols = m->ncols, nrows = m->nrows;
+  float *restrict W;
+  CHECK((W = malloc(ncols * nrows * sizeof(float))) != NULL);
+
+  // initialisation W
+  const float max = max_terrain(m) + 10.;
+  for(int i = 0 ; i < nrows ; i++)
+  {
+    for(int j = 0 ; j < ncols ; j++)
     {
-        #pragma omp for collapse(2)
-        for(int i = start_row; i < start_row + num_rows; i++) {
-            for(int j = 0; j < m->ncols; j++) {
-                float val = TERRAIN(m, i, j);
-                if(val > max_val) max_val = val;
-            }
-        }
+      if(i==0 || i==nrows-1 || j==0 || j==ncols-1 || TERRAIN(m,i,j) == m->no_data)
+        WTERRAIN(W,i,j) = TERRAIN(m,i,j);
+      else
+        WTERRAIN(W,i,j) = max;
     }
-    return max_val;
+  }
+
+  return(W);
 }
 
-static float *init_W_band(const mnt *m, int start_row, int num_rows) {
-    int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    
-    float *W;
-    CHECK((W = malloc(num_rows * m->ncols * sizeof(float))) != NULL);
+// variables globales pour l'affichage de la progression
+#ifdef DARBOUX_PPRINT
+float min_darboux=9999.; // ça ira bien, c'est juste de l'affichage
+int iter_darboux=0;
+// fonction d'affichage de la progression
+void dpprint()
+{
+  if(min_darboux != 9999.)
+  {
+    fprintf(stderr, "%.3f %d\r", min_darboux, iter_darboux++);
+    fflush(stderr);
+    min_darboux = 9999.;
+  }
+  else
+    fprintf(stderr, "\n");
+}
+#endif
 
-    float local_max = max_terrain_band(m, start_row, num_rows);
-    float global_max;
-    MPI_Allreduce(&local_max, &global_max, 1, MPI_FLOAT, MPI_MAX, MPI_COMM_WORLD);
-    global_max += 10.0;
 
-    #pragma omp parallel for collapse(2)
-    for(int i = 0; i < num_rows; i++) {
-        for(int j = 0; j < m->ncols; j++) {
-            int global_i = start_row + i;
-            if(global_i == 0 || global_i == m->nrows-1 || j == 0 || j == m->ncols-1 || 
-               TERRAIN(m, global_i, j) == m->no_data) {
-                W[i * m->ncols + j] = TERRAIN(m, global_i, j);
-            } else {
-                W[i * m->ncols + j] = global_max;
-            }
-        }
+// pour parcourir les 8 voisins :
+const int VOISINS[8][2] = {{-1,-1}, {-1,0}, {-1,1}, {0,-1}, {0,1}, {1,-1}, {1,0}, {1,1}};
+
+// cette fonction calcule le nouveau W[i,j] en utilisant Wprec[i,j]
+// et ses 8 cases voisines : Wprec[i +/- 1 , j +/- 1],
+// ainsi que le MNT initial m en position [i,j]
+// inutile de modifier cette fonction (elle est sensible...):
+int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, const int i, const int j)
+{
+  const int nrows = m->nrows, ncols = m->ncols;
+  int modif = 0;
+
+  // on prend la valeur précédente...
+  WTERRAIN(W,i,j) = WTERRAIN(Wprec,i,j);
+  // ... sauf si :
+  if(WTERRAIN(Wprec,i,j) > TERRAIN(m,i,j))
+  {
+    // parcourir les 8 voisins haut/bas + gauche/droite
+    for(int v=0; v<8; v++)
+    {
+      const int n1 = i + VOISINS[v][0];
+      const int n2 = j + VOISINS[v][1];
+
+      // vérifie qu'on ne sort pas de la grille.
+      // ceci est théoriquement impossible, si les bords de la matrice Wprec
+      // sont bien initialisés avec les valeurs des bords du mnt
+      CHECK(n1>=0 && n1<nrows && n2>=0 && n2<ncols);
+
+      // si le voisin est inconnu, on l'ignore et passe au suivant
+      if(WTERRAIN(Wprec,n1,n2) == m->no_data)
+        continue;
+
+      CHECK(TERRAIN(m,i,j)>m->no_data);
+      CHECK(WTERRAIN(Wprec,i,j)>m->no_data);
+      CHECK(WTERRAIN(Wprec,n1,n2)>m->no_data);
+
+      // il est important de mettre cette valeur dans un temporaire, sinon le
+      // compilo fait des arrondis flotants divergents dans les tests ci-dessous
+      const float Wn = WTERRAIN(Wprec,n1,n2) + EPSILON;
+      if(TERRAIN(m,i,j) >= Wn)
+      {
+        WTERRAIN(W,i,j) = TERRAIN(m,i,j);
+        modif = 1;
+        #ifdef DARBOUX_PPRINT
+        if(WTERRAIN(W,i,j)<min_darboux)
+          min_darboux = WTERRAIN(W,i,j);
+        #endif
+      }
+      else if(WTERRAIN(Wprec,i,j) > Wn)
+      {
+        WTERRAIN(W,i,j) = Wn;
+        modif = 1;
+        #ifdef DARBOUX_PPRINT
+        if(WTERRAIN(W,i,j)<min_darboux)
+          min_darboux = WTERRAIN(W,i,j);
+        #endif
+      }
     }
-
-    return W;
+  }
+  return(modif);
 }
 
+/*****************************************************************************/
+/*           Fonction de calcul principale - À PARALLÉLISER                  */
+/*****************************************************************************/
 mnt *darboux(const mnt *restrict m) {
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size); 
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int start_row, num_rows;
-    calculate_band_size(rank, size, m->nrows, &start_row, &num_rows);
+    int nrows = m->nrows, ncols = m->ncols;
 
-    float *W = malloc(num_rows * m->ncols * sizeof(float));
-    float *Wprec = init_W_band(m, start_row, num_rows);
-    CHECK(W != NULL);
+    float *W = malloc(nrows * ncols * sizeof(float));
+    float *Wprec = malloc(nrows * ncols * sizeof(float));
+    CHECK(W != NULL && Wprec != NULL);
 
-    float *top_recv = NULL, *bottom_recv = NULL;
-    float *top_send = NULL, *bottom_send = NULL;
-    
-    if (rank > 0) {
-        top_send = malloc(m->ncols * sizeof(float));
-        top_recv = malloc(m->ncols * sizeof(float));
-        CHECK(top_send != NULL && top_recv != NULL);
+    if (rank == 0) {
+        float *W_init = init_W(m);
+        memcpy(Wprec, W_init, nrows * ncols * sizeof(float));
+        free(W_init);
     }
-    if (rank < size - 1) {
-        bottom_send = malloc(m->ncols * sizeof(float));
-        bottom_recv = malloc(m->ncols * sizeof(float));
-        CHECK(bottom_send != NULL && bottom_recv != NULL);
-    }
+
+    MPI_Bcast(Wprec, nrows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
     int global_modif = 1;
-    while(global_modif) {
+    while (global_modif) {
         int local_modif = 0;
 
-        MPI_Request requests[4];
-        int req_count = 0;
-
-        if (rank > 0) {
-            memcpy(top_send, Wprec, m->ncols * sizeof(float));
-            MPI_Isend(top_send, m->ncols, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD, &requests[req_count]);
-            MPI_Irecv(top_recv, m->ncols, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD, &requests[req_count+1]);
-            req_count += 2;
-        }
-        if (rank < size - 1) {
-            memcpy(bottom_send, &Wprec[(num_rows-1)*m->ncols], m->ncols * sizeof(float));
-            MPI_Isend(bottom_send, m->ncols, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD, &requests[req_count]);
-            MPI_Irecv(bottom_recv, m->ncols, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD, &requests[req_count+1]);
-            req_count += 2;
-        }
-
-        if (req_count > 0) {
-            MPI_Waitall(req_count, requests, MPI_STATUSES_IGNORE);
-        }
-
-        #pragma omp parallel reduction(|:local_modif)
-        {
-            #pragma omp for schedule(dynamic)
-            for(int i = start_row; i < start_row + num_rows; i++) {
-                for(int j = 0; j < m->ncols; j++) {
-                    if(i == 0 || i == m->nrows-1 || j == 0 || j == m->ncols-1 || 
-                       TERRAIN(m, i, j) == m->no_data) {
-                        W[(i-start_row)*m->ncols + j] = TERRAIN(m, i, j);
-                        continue;
-                    }
-                    local_modif |= calcul_Wij(W, Wprec, m, i, j, top_recv, bottom_recv,
-                                            start_row, num_rows, rank, size);
+        #pragma omp parallel for reduction(|:local_modif) schedule(dynamic)
+        for (int i = 0; i < nrows; i++) {
+            for (int j = 0; j < ncols; j++) {
+                if (i == 0 || i == nrows - 1 || j == 0 || j == ncols - 1 || TERRAIN(m, i, j) == m->no_data) {
+                    WTERRAIN(W, i, j) = TERRAIN(m, i, j);
+                    continue;
                 }
+                local_modif |= calcul_Wij(W, Wprec, m, i, j);
             }
         }
 
@@ -198,42 +176,16 @@ mnt *darboux(const mnt *restrict m) {
 
     mnt *res = NULL;
     if (rank == 0) {
-        CHECK((res = malloc(sizeof(*res))) != NULL);
+        res = malloc(sizeof(*res));
+        CHECK(res != NULL);
         memcpy(res, m, sizeof(*res));
-        CHECK((res->terrain = malloc(m->nrows * m->ncols * sizeof(float))) != NULL);
-    }
-
-    int *recvcounts = NULL;
-    int *displs = NULL;
-    if (rank == 0) {
-        recvcounts = malloc(size * sizeof(int));
-        displs = malloc(size * sizeof(int));
-        
-        int offset = 0;
-        for (int i = 0; i < size; i++) {
-            int proc_start, proc_num_rows;
-            calculate_band_size(i, size, m->nrows, &proc_start, &proc_num_rows);
-            recvcounts[i] = proc_num_rows * m->ncols;
-            displs[i] = offset;
-            offset += proc_num_rows * m->ncols;
-        }
-    }
-
-    MPI_Gatherv(Wprec, num_rows * m->ncols, MPI_FLOAT,
-                res ? res->terrain : NULL, recvcounts, displs, MPI_FLOAT,
-                0, MPI_COMM_WORLD);
-
-    if (rank == 0) {
-        free(recvcounts);
-        free(displs);
+        res->terrain = malloc(nrows * ncols * sizeof(float));
+        CHECK(res->terrain != NULL);
+        memcpy(res->terrain, Wprec, nrows * ncols * sizeof(float));
     }
 
     free(W);
     free(Wprec);
-    if (top_send) free(top_send);
-    if (top_recv) free(top_recv);
-    if (bottom_send) free(bottom_send);
-    if (bottom_recv) free(bottom_recv);
 
     return res;
 }
