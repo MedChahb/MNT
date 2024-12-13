@@ -15,7 +15,7 @@
 #include <omp.h>
 #endif
 
-#define SEQ_EXEC_TIME 190.232  // temps sequentiel de calcul avec large.mnt
+#define SEQ_EXEC_TIME 175.232  // temps sequentiel de calcul avec large.mnt
 
 int main(int argc, char **argv)
 {
