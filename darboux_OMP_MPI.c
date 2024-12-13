@@ -139,45 +139,65 @@ mnt *darboux(const mnt *restrict m) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     int nrows = m->nrows, ncols = m->ncols;
+    int rows_per_rank = nrows / size;
+    int start_row = rank * rows_per_rank;
+    int end_row = (rank == size - 1) ? nrows : (rank + 1) * rows_per_rank;
 
-    float *W = malloc(nrows * ncols * sizeof(float));
-    float *Wprec = malloc(nrows * ncols * sizeof(float));
+    int local_rows = end_row - start_row;
+    float *W = malloc(local_rows * ncols * sizeof(float));
+    float *Wprec = malloc(local_rows * ncols * sizeof(float));
     CHECK(W != NULL && Wprec != NULL);
 
+    // Initialize Wprec locally
     if (rank == 0) {
         float *W_init = init_W(m);
-        memcpy(Wprec, W_init, nrows * ncols * sizeof(float));
+        memcpy(Wprec, W_init + start_row * ncols, local_rows * ncols * sizeof(float));
         free(W_init);
+    } else {
+        MPI_Bcast(Wprec, local_rows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
     }
 
-    MPI_Bcast(Wprec, nrows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    float *top_row = rank > 0 ? malloc(ncols * sizeof(float)) : NULL;
+    float *bottom_row = rank < size - 1 ? malloc(ncols * sizeof(float)) : NULL;
+    CHECK((rank == 0 || top_row != NULL) && (rank == size - 1 || bottom_row != NULL));
 
-    int global_modif = 1; 
+    int global_modif = 1;
     while (global_modif) {
         int local_modif = 0;
 
+        // Exchange border rows with neighbors
+        if (rank > 0) {
+            MPI_Sendrecv(Wprec, ncols, MPI_FLOAT, rank - 1, 0,
+                         top_row, ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (rank < size - 1) {
+            MPI_Sendrecv(Wprec + (local_rows - 1) * ncols, ncols, MPI_FLOAT, rank + 1, 0,
+                         bottom_row, ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+
+        // Parallelized computation for local rows
         #pragma omp parallel for reduction(|:local_modif) schedule(dynamic)
-        for (int i = 0; i < nrows; i++) {
+        for (int i = 0; i < local_rows; i++) {
             for (int j = 0; j < ncols; j++) {
-                if (i == 0 || i == nrows - 1 || j == 0 || j == ncols - 1 || TERRAIN(m, i, j) == m->no_data) {
-                    WTERRAIN(W, i, j) = TERRAIN(m, i, j);
+                if ((i + start_row) == 0 || (i + start_row) == nrows - 1 || j == 0 || j == ncols - 1 ||
+                    TERRAIN(m, i + start_row, j) == m->no_data) {
+                    WTERRAIN(W, i, j) = TERRAIN(m, i + start_row, j);
                     continue;
                 }
-                local_modif |= calcul_Wij(W, Wprec, m, i, j);
+                // Use border rows for neighbors if applicable
+                local_modif |= calcul_Wij(W, Wprec, m, i + start_row, j, top_row, bottom_row, rank, size, ncols);
             }
         }
 
-        #ifdef DARBOUX_PPRINT
-        dpprint();
-        #endif
-
         MPI_Allreduce(&local_modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 
+        // Swap buffers
         float *tmp = W;
         W = Wprec;
         Wprec = tmp;
     }
 
+    // Gather results to rank 0
     mnt *res = NULL;
     if (rank == 0) {
         res = malloc(sizeof(*res));
@@ -185,11 +205,16 @@ mnt *darboux(const mnt *restrict m) {
         memcpy(res, m, sizeof(*res));
         res->terrain = malloc(nrows * ncols * sizeof(float));
         CHECK(res->terrain != NULL);
-        memcpy(res->terrain, Wprec, nrows * ncols * sizeof(float));
     }
 
+    MPI_Gather(Wprec, local_rows * ncols, MPI_FLOAT,
+               res ? res->terrain : NULL, local_rows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+    // Cleanup
     free(W);
     free(Wprec);
+    if (top_row) free(top_row);
+    if (bottom_row) free(bottom_row);
 
     return res;
 }
