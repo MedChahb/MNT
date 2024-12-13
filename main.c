@@ -17,7 +17,7 @@
 #endif
 
 #define SEQ_EXEC_TIME_LARGE  269.706  // temps sequentiel de calcul avec large.mnt (sur une des vms)
-#define SEQ_EXEC_TIME_MEDIUM 20.595  // temps sequentiel de calcul avec medium.mnt (sur une des vms)
+#define SEQ_EXEC_TIME_MEDIUM 15.745  // temps sequentiel de calcul avec medium.mnt (sur une des vms)
 
 int main(int argc, char **argv)
 {
