@@ -67,7 +67,9 @@ int main(int argc, char **argv)
     MPI_Bcast(m->terrain, nrows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
     // Call Darboux algorithm
+    double t1 = omp_get_wtime();
     d = darboux(m);
+    double t2 = omp_get_wtime();
 
     // Write output only on rank 0
     if (rank == 0) {
@@ -87,6 +89,7 @@ int main(int argc, char **argv)
         }
     }
 
+    double t3 = omp_get_wtime();
     // Free memory
     if (rank == 0) {
         free(m->terrain);
@@ -98,6 +101,9 @@ int main(int argc, char **argv)
         free(m);
     }
 
+    if(rank == 0){
+    printf("\nCompute: %lfs, Savefile: %lf\n", t2-t1, t3-t2);
+    }
     // Finalize MPI
     MPI_Finalize();
     return 0;
