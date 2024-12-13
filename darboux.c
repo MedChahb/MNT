@@ -151,25 +151,23 @@ int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, con
 #ifdef MPI
 void exchange_boundaries(float *W, int start, int end, int ncols, int rank, int size)
 {
-    int start_offset = start * ncols;
-    int end_offset = end * ncols;
-    if (rank % 2 != 0) {
-        if (rank > 0) {
-            MPI_Recv(&W[start_offset - ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            MPI_Ssend(&W[start_offset], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+    if (rank % 2 == 0) {
+        if (rank + 1 < size) {
+            MPI_Ssend(&W[(end - 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+            MPI_Recv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
-        if (rank < size - 1) {
-            MPI_Recv(&W[end_offset], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            MPI_Ssend(&W[end_offset - ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+        if (rank - 1 >= 0) {
+            MPI_Ssend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+            MPI_Recv(&W[(start - 1) * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
     } else {
-        if (rank < size - 1) {
-            MPI_Ssend(&W[end_offset - ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
-            MPI_Recv(&W[end_offset], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        if (rank - 1 >= 0) {
+            MPI_Recv(&W[(start - 1) * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Ssend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
         }
-        if (rank > 0) {
-            MPI_Ssend(&W[start_offset], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
-            MPI_Recv(&W[start_offset - ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        if (rank + 1 < size) {
+            MPI_Recv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Ssend(&W[(end - 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
         }
     }
 }
@@ -179,17 +177,20 @@ void gather_data(float *W, int blockSize, int ncols, int nrows, int rank, int si
     if (rank == 0) {
         for (int i = 1; i < size; i++) {
             if (i != size - 1) {
-                MPI_Recv(W + i * blockSize * ncols, blockSize * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(W + (i * blockSize) * ncols, blockSize * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             } else {
-                MPI_Recv(W + i * blockSize * ncols, nrows * ncols - i * blockSize * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(W + (i * blockSize) * ncols, nrows * ncols - (i * blockSize) * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
         }
     } else {
-        MPI_Send(W + rank * blockSize * ncols, blockSize * ncols, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+        MPI_Send(W + (rank * blockSize) * ncols, (rank == size - 1 ? nrows - rank * blockSize : blockSize) * ncols, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
     }
 }
 #endif
-
+/*****************************************************************************/
+/*           Fonction de calcul principale - À PARALLÉLISER                  */
+/*****************************************************************************/
+// applique l'algorithme de Darboux sur le MNT m, pour calculer un nouveau MNT
 mnt *darboux(const mnt *restrict m)
 {
   #if defined(OMP) || defined(MPI)
@@ -213,21 +214,17 @@ mnt *darboux(const mnt *restrict m)
   float *restrict W, *restrict Wprec;
   CHECK((W = malloc(ncols * nrows * sizeof(float))) != NULL);
   Wprec = init_W(m);
+  
   #ifdef MPI
   MPI_Bcast(Wprec, ncols * nrows, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+  int blockSize = nrows / size;
+  int start = rank * blockSize;
+  int end = (rank == size - 1) ? nrows : start + blockSize;
   #endif
 
   // calcul : boucle principale
   int modif = 1;
-  #ifdef MPI
-  int blockSize = nrows / size;
-  int start = rank * blockSize;
-  int end = (rank == size - 1)? nrows : start + blockSize;
-  #elif defined(OMP)
-  int start = 0;
-  int end = nrows;
-  #endif
-
   while (modif) {
       modif = 0;  // sera mis à 1 s'il y a une modification
 
@@ -240,11 +237,13 @@ mnt *darboux(const mnt *restrict m)
           thread_start = omp_get_wtime();
 
           #pragma omp for reduction(|:modif) schedule(dynamic)
-          // calcule le nouveau W fonction de l'ancien (Wprec) en chaque point [i,j]
-          for (int i = start; i < end; i++) {
-              for (int j=0; j<ncols; j++){
-                // calcule la nouvelle valeur de W[i,j]
-                // en utilisant les 8 voisins de la position [i,j] du tableau Wprec
+          #ifdef MPI
+          for (int i = start; i < end; i++)
+          #else
+          for (int i = 0; i < nrows; i++)
+          #endif
+          {
+              for (int j = 0; j < ncols; j++) {
                   modif |= calcul_Wij(W, Wprec, m, i, j);
               }
           }
@@ -253,7 +252,6 @@ mnt *darboux(const mnt *restrict m)
           thread_timings[tid].time += thread_end - thread_start;
       }
       #else
-      // Sequential version
       for (int i = 0; i < nrows; i++) {
           for (int j = 0; j < ncols; j++) {
               modif |= calcul_Wij(W, Wprec, m, i, j);
@@ -261,28 +259,28 @@ mnt *darboux(const mnt *restrict m)
       }
       #endif
 
-    #ifdef MPI
-    exchange_boundaries(W, start, end, ncols, rank, size);
-    #endif
+      #ifdef MPI
+      exchange_boundaries(W, start, end, ncols, rank, size);
+      #endif
 
-    #ifdef DARBOUX_PPRINT
-    #ifdef MPI
-    if (rank == 0)
-    #endif
-      dpprint();
-    #endif
+      #ifdef DARBOUX_PPRINT
+      #ifdef MPI
+      if (rank == 0)
+      #endif
+          dpprint();
+      #endif
 
-    // échange W et Wprec
-    // sans faire de copie mémoire : échange les pointeurs sur les deux tableaux
-    float *tmp = W;
-    W = Wprec;
-    Wprec = tmp;
+      // échange W et Wprec
+      // sans faire de copie mémoire : échange les pointeurs sur les deux tableaux
+      float *tmp = W;
+      W = Wprec;
+      Wprec = tmp;
 
-    #ifdef MPI
-    int global_modif = 0;
-    MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
-    modif |= global_modif;
-    #endif
+      #ifdef MPI
+      int global_modif;
+      MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+      modif = global_modif;
+      #endif
   }
   // fin du while principal
 
@@ -302,6 +300,7 @@ mnt *darboux(const mnt *restrict m)
   }
   free(thread_timings);
   #endif
+
   // fin du calcul, le résultat se trouve dans W
   free(Wprec);
   // crée la structure résultat et la renvoie
@@ -311,3 +310,4 @@ mnt *darboux(const mnt *restrict m)
   res->terrain = W;
   return(res);
 }
+//lent to but same res
