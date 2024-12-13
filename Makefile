@@ -25,20 +25,22 @@ main.o: main.c io.h check.h type.h
 darboux.o: darboux.c darboux.h
 	$(CC) $(CFLAGS) -c darboux.c -o darboux.o
 
-darboux_OMP.o: darboux_OMP.c darboux.h
-	$(CC) $(CFLAGS) $(OMPFLAGS) -c darboux_OMP.c -o darboux_OMP.o
+#ok
+darboux_OMP.o: darboux.c darboux.h
+	$(CC) $(CFLAGS) $(OMPFLAGS) -DOMP -c darboux.c -o darboux_OMP.o
 
+#ok
 main_omp.o: main.c io.h check.h type.h
 	$(CC) $(CFLAGS) $(OMPFLAGS) -c main.c -o main_omp.o
-
+#ok
 io_omp.o: io.c io.h check.h type.h
 	$(CC) $(CFLAGS) $(OMPFLAGS) -c io.c -o io_omp.o
 
-darboux_OMP_MPI.o: darboux_OMP_MPI.c darboux.h
-	$(MPICC) $(CFLAGS) $(OMPFLAGS) -c darboux_OMP_MPI.c -o darboux_OMP_MPI.o
+darboux_OMP_MPI.o: darboux.c darboux.h
+	$(MPICC) $(CFLAGS) $(OMPFLAGS) -DMPI -c darboux.c -o darboux_OMP_MPI.o
 
-main_mpi.o: main_MPI.c io.h check.h type.h
-	$(MPICC) $(CFLAGS) $(OMPFLAGS) -c main_MPI.c -o main_mpi.o
+main_mpi.o: main.c io.h check.h type.h
+	$(MPICC) $(CFLAGS) $(OMPFLAGS) -DMPI -c main.c -o main_mpi.o
 
 io_mpi.o: io.c io.h check.h type.h
 	$(MPICC) $(CFLAGS) $(OMPFLAGS) -c io.c -o io_mpi.o
