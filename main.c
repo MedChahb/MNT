@@ -1,21 +1,32 @@
 // programme principal
 #include <stdio.h>
 #include <stdlib.h>
-#include <omp.h>
+#include <time.h>
 #include "type.h"
 #include "io.h"
 #include "darboux.h"
 
+#ifdef OMP
+#include <omp.h>
+#endif
+
 #ifdef MPI
 #include "mpi.h"
+#include <omp.h>
 #endif
 
 int main(int argc, char **argv)
 {
+  double start_time, end_time;
+  
   #ifdef MPI
-  int rank;
+  int rank, size;
+  char processor_name[MPI_MAX_PROCESSOR_NAME];
+  int name_len;
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  MPI_Get_processor_name(processor_name, &name_len);
   #endif
 
   mnt *m, *d;
@@ -26,15 +37,32 @@ int main(int argc, char **argv)
     exit(1);
   }
 
+  // Start timing
+  #ifdef MPI
+  start_time = MPI_Wtime();
+  #elif defined(OMP)
+  start_time = omp_get_wtime();
+  #else
+  start_time = (double)clock() / CLOCKS_PER_SEC;
+  #endif
+
   // READ INPUT
   m = mnt_read(argv[1]);
 
   // COMPUTE
   d = darboux(m);
 
+  // End timing
+  #ifdef MPI
+  end_time = MPI_Wtime();
+  #elif defined(OMP)
+  end_time = omp_get_wtime();
+  #else
+  end_time = (double)clock() / CLOCKS_PER_SEC;
+  #endif
   
   #ifdef MPI
-  if (rank == 0){
+  if (rank == 0) {
   #endif
 
   // WRITE OUTPUT
@@ -48,9 +76,16 @@ int main(int argc, char **argv)
     fclose(out);
   else
     mnt_write_lakes(m, d, stdout);
+
+  // Print total execution time
+  fprintf(stderr, "\nTotal execution time: %.3f seconds\n", end_time - start_time);
   
   #ifdef MPI
   }
+
+  // Print MPI process timing information
+  fprintf(stderr, "Process %d on %s: Execution time = %.3f seconds\n", 
+          rank, processor_name, end_time - start_time);
   #endif
 
   // free
@@ -58,7 +93,6 @@ int main(int argc, char **argv)
   free(m);
   free(d->terrain);
   free(d);
-
 
   #ifdef MPI
   MPI_Finalize();

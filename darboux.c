@@ -5,13 +5,16 @@
 #include "type.h"
 #include "darboux.h"
 
-#ifdef OMP
+#if defined(OMP) || defined(MPI)
 #include <omp.h>
+struct ThreadTiming {
+    int thread_id;
+    double time;
+};
 #endif
 
 #ifdef MPI
 #include "mpi.h"
-#include <omp.h>
 #endif
 
 // si ce define n'est pas commenté, l'exécution affiche sur stderr la hauteur
@@ -139,10 +142,6 @@ int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, con
   return modif;
 }
 
-/*****************************************************************************/
-/*           Fonction de calcul principale - À PARALLÉLISER                  */
-/*****************************************************************************/
-// Fonction qui gère les échanges de frontières (to make the code cleaner :D )
 #ifdef MPI
 void exchange_boundaries(float *W, int start, int end, int ncols, int rank, int size)
 {
@@ -169,7 +168,6 @@ void exchange_boundaries(float *W, int start, int end, int ncols, int rank, int 
     }
 }
 
-// Fonction pour rassembler les données de tous les processus vers le processus 0 (to make the code cleaner :D )
 void gather_data(float *W, int blockSize, int ncols, int nrows, int rank, int size)
 {
     if (rank == 0) {
@@ -186,10 +184,16 @@ void gather_data(float *W, int blockSize, int ncols, int nrows, int rank, int si
 }
 #endif
 
-// applique l'algorithme de Darboux sur le MNT m, pour calculer un nouveau MNT
 mnt *darboux(const mnt *restrict m)
 {
-  //omp_set_num_threads(4); // for tests
+  #if defined(OMP) || defined(MPI)
+  int max_threads = omp_get_max_threads();
+  struct ThreadTiming *thread_timings = malloc(max_threads * sizeof(struct ThreadTiming));
+  for (int i = 0; i < max_threads; i++) {
+      thread_timings[i].time = 0.0;
+      thread_timings[i].thread_id = i;
+  }
+  #endif
 
   #ifdef MPI
   int rank, size;
@@ -219,21 +223,32 @@ mnt *darboux(const mnt *restrict m)
   #endif
 
   while (modif) {
-    modif = 0; // sera mis à 1 s'il y a une modification
+    modif = 0;
 
-    // calcule le nouveau W fonction de l'ancien (Wprec) en chaque point [i,j]
     #if defined(OMP) || defined(MPI)
-    #pragma omp parallel for reduction(|:modif) schedule(dynamic)
+    #pragma omp parallel reduction(|:modif)
     #endif
-    for (int i = start; i < end; i++) {
-      for (int j = 0; j < ncols; j++) {
-        // calcule la nouvelle valeur de W[i,j]
-        // en utilisant les 8 voisins de la position [i,j] du tableau Wprec
-        modif |= calcul_Wij(W, Wprec, m, i, j);
-      }
+    {
+        #if defined(OMP) || defined(MPI)
+        int tid = omp_get_thread_num();
+        double thread_start = omp_get_wtime();
+        #endif
+
+        #if defined(OMP) || defined(MPI)
+        #pragma omp for schedule(dynamic)
+        #endif
+        for (int i = start; i < end; i++) {
+          for (int j = 0; j < ncols; j++) {
+            modif |= calcul_Wij(W, Wprec, m, i, j);
+          }
+        }
+
+        #if defined(OMP) || defined(MPI)
+        double thread_end = omp_get_wtime();
+        thread_timings[tid].time += thread_end - thread_start;
+        #endif
     }
 
-    // Gestion des échanges de frontières
     #ifdef MPI
     exchange_boundaries(W, start, end, ncols, rank, size);
     #endif
@@ -245,8 +260,6 @@ mnt *darboux(const mnt *restrict m)
       dpprint();
     #endif
 
-    // échange W et Wprec
-    // sans faire de copie mémoire : échange les pointeurs sur les deux tableaux
     float *tmp = W;
     W = Wprec;
     Wprec = tmp;
@@ -257,16 +270,25 @@ mnt *darboux(const mnt *restrict m)
     modif |= global_modif;
     #endif
   }
-  // fin du while principal
 
-  // Rassemblement des données de tous les processus vers le processus 0
   #ifdef MPI
   gather_data(W, blockSize, ncols, nrows, rank, size);
   #endif
 
-  // Cleanup
+  #if defined(OMP) || defined(MPI)
+  // Print thread timing information
+  #ifdef MPI
+  fprintf(stderr, "\nProcess %d Thread Timings:\n", rank);
+  #else
+  fprintf(stderr, "\nThread Timings:\n");
+  #endif
+  for (int i = 0; i < max_threads; i++) {
+      fprintf(stderr, "Thread %d: %.3f seconds\n", thread_timings[i].thread_id, thread_timings[i].time);
+  }
+  free(thread_timings);
+  #endif
+
   free(Wprec);
-  // crée la structure résultat et la renvoie
   mnt *res;
   CHECK((res = malloc(sizeof(*res))) != NULL);
   memcpy(res, m, sizeof(*res));
