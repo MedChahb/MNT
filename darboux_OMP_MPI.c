@@ -133,63 +133,101 @@ int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, con
 /*****************************************************************************/
 /*           Fonction de calcul principale - À PARALLÉLISER                  */
 /*****************************************************************************/
-mnt *darboux(const mnt *restrict m) {
-    int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+// applique l'algorithme de Darboux sur le MNT m, pour calculer un nouveau MNT
+mnt *darboux(const mnt *restrict m )
+{
 
-    int nrows = m->nrows, ncols = m->ncols;
+  int rank,size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  
+  const int ncols = m->ncols, nrows = m->nrows;
 
-    float *W = malloc(nrows * ncols * sizeof(float));
-    float *Wprec = malloc(nrows * ncols * sizeof(float));
-    CHECK(W != NULL && Wprec != NULL);
+  float *restrict W, *restrict Wprec;
+  CHECK((W = malloc(ncols * nrows * sizeof(float))) != NULL);
+  Wprec = init_W(m);
+  MPI_Bcast(Wprec, ncols*nrows, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-    if (rank == 0) {
-        float *W_init = init_W(m);
-        memcpy(Wprec, W_init, nrows * ncols * sizeof(float));
-        free(W_init);
-    }
+  int modif = 1;
+  int chunk_size = (int)((nrows / size));
+  int start = rank * chunk_size;
+  int end; 
+  if (rank == size - 1){
+    end = nrows;
+  }
+  else{
+    end = start + chunk_size; 
+  }
 
-    MPI_Bcast(Wprec, nrows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
+  while(modif)
+    {
+      
+      modif = 0; // sera mis à 1 s'il y a une modification
 
-    int global_modif = 1;
-    while (global_modif) {
-        int local_modif = 0;
-
-        #pragma omp parallel for reduction(|:local_modif) schedule(dynamic)
-        for (int i = 0; i < nrows; i++) {
-            for (int j = 0; j < ncols; j++) {
-                if (i == 0 || i == nrows - 1 || j == 0 || j == ncols - 1 || TERRAIN(m, i, j) == m->no_data) {
-                    WTERRAIN(W, i, j) = TERRAIN(m, i, j);
-                    continue;
-                }
-                local_modif |= calcul_Wij(W, Wprec, m, i, j);
-            }
+      #pragma omp parallel for reduction(|:modif) schedule(dynamic)
+      for(int i=start; i<end; i++)
+      {
+        for(int j=0; j<ncols; j++)
+        {
+          modif |= calcul_Wij(W, Wprec, m, i, j);
         }
+      }
 
-        #ifdef DARBOUX_PPRINT
-        dpprint();
-        #endif
+      #ifdef DARBOUX_PPRINT
+      dpprint();
+      #endif
+      
 
-        MPI_Allreduce(&local_modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+     // Gestion des échanges de frontières
+      if (rank % 2 == 0) {
+          if (rank + 1 < size) {
+              MPI_Ssend(&W[(end - 1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+              MPI_Recv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+          }
+          if (rank - 1 >= 0) {
+              MPI_Ssend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+              MPI_Recv(&W[(start -1)* ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+          }
+        } 
+        else {
+            if (rank - 1 >= 0) {
+                MPI_Recv(&W[(start - 1) * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Ssend(&W[start * ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+            }
 
-        float *tmp = W;
+            if (rank + 1 < size) {
+                MPI_Recv(&W[end * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Ssend(&W[(end-1) * ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+            }
+
+        }
+       float *tmp = W;
+
         W = Wprec;
         Wprec = tmp;
+      
+      int global_modif = 0;
+      MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+      modif |= global_modif;
     }
-
-    mnt *res = NULL;
     if (rank == 0) {
-        res = malloc(sizeof(*res));
-        CHECK(res != NULL);
-        memcpy(res, m, sizeof(*res));
-        res->terrain = malloc(nrows * ncols * sizeof(float));
-        CHECK(res->terrain != NULL);
-        memcpy(res->terrain, Wprec, nrows * ncols * sizeof(float));
+      for (int i = 1; i < size; i++) {
+        if (i != size - 1) {
+          MPI_Recv(W + (i * chunk_size) * ncols, chunk_size*ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (i == size - 1) {
+          MPI_Recv(W + (i * chunk_size) * ncols, nrows*ncols-(i * chunk_size) * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+      }
+    }
+    else {
+       MPI_Send(W + (rank * chunk_size) * ncols,end*ncols-start* ncols, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
     }
 
-    free(W);
-    free(Wprec);
-
-    return res;
+  free(Wprec);
+  mnt *res;
+  CHECK((res=malloc(sizeof(*res))) != NULL);
+  memcpy(res, m, sizeof(*res));
+  res->terrain = W;
+  return(res);
 }
