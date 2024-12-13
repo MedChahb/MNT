@@ -126,7 +126,7 @@ static float *init_W_band(const mnt *m, int start_row, int num_rows) {
 mnt *darboux(const mnt *restrict m) {
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(MPI_COMM_WORLD, &size); 
 
     int start_row, num_rows;
     calculate_band_size(rank, size, m->nrows, &start_row, &num_rows);
