@@ -15,7 +15,7 @@
 #include <omp.h>
 #endif
 
-#define SEQ_EXEC_TIME 188.876  // temps sequentiel de calcul avec large.mnt
+#define SEQ_EXEC_TIME 180.232  // temps sequentiel de calcul avec large.mnt
 
 int main(int argc, char **argv)
 {
@@ -81,10 +81,8 @@ int main(int argc, char **argv)
   else
     mnt_write_lakes(m, d, stdout);
 
-  // Print total execution time
   fprintf(stderr, "\nTotal execution time: %.3f seconds\n", execution_time);
   
-  // Print speedup for parallel versions
   #if defined(OMP) || defined(MPI)
   fprintf(stderr, "Speedup: %.2fx\n", SEQ_EXEC_TIME / execution_time);
   #endif
@@ -92,7 +90,6 @@ int main(int argc, char **argv)
   #ifdef MPI
   }
 
-  // Print MPI process timing information
   fprintf(stderr, "Process %d on %s: Execution time = %.3f seconds\n", 
           rank, processor_name, execution_time);
   #endif
