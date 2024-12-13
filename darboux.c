@@ -221,7 +221,7 @@ mnt *darboux(const mnt *restrict m)
     modif = 0; // sera mis à 1 s'il y a une modification
 
     // calcule le nouveau W fonction de l'ancien (Wprec) en chaque point [i,j]
-    #ifdef OMP
+    #ifdef OMP || MPI
     #pragma omp parallel for reduction(|:modif) schedule(dynamic)
     #endif
     for (int i = start; i < end; i++) {
