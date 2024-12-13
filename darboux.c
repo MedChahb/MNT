@@ -145,45 +145,39 @@ int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, con
 #ifdef MPI
 void exchange_boundaries(float *W, int start, int end, int ncols, int rank, int size)
 {
-    MPI_Request requests[4];
-    int req_count = 0;
-
-    // Post receives first to avoid deadlock
-    if (rank > 0) {
-        MPI_Irecv(W + (start - 1) * ncols, ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
-    }
-    if (rank < size - 1) {
-        MPI_Irecv(W + end * ncols, ncols, MPI_FLOAT, rank + 1, 1, MPI_COMM_WORLD, &requests[req_count++]);
-    }
-
-    // Then post sends
-    if (rank > 0) {
-        MPI_Isend(W + start * ncols, ncols, MPI_FLOAT, rank - 1, 1, MPI_COMM_WORLD, &requests[req_count++]);
-    }
-    if (rank < size - 1) {
-        MPI_Isend(W + (end - 1) * ncols, ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, &requests[req_count++]);
-    }
-
-    // Wait for all communications to complete
-    if (req_count > 0) {
-        MPI_Waitall(req_count, requests, MPI_STATUSES_IGNORE);
+    int start_offset = start * ncols;
+    int end_offset = end * ncols;
+    if (rank % 2 != 0) {
+        if (rank > 0) {
+            MPI_Recv(&W[start_offset - ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Ssend(&W[start_offset], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+        }
+        if (rank < size - 1) {
+            MPI_Recv(&W[end_offset], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Ssend(&W[end_offset - ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+        }
+    } else {
+        if (rank < size - 1) {
+            MPI_Ssend(&W[end_offset - ncols], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+            MPI_Recv(&W[end_offset], ncols, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (rank > 0) {
+            MPI_Ssend(&W[start_offset], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+            MPI_Recv(&W[start_offset - ncols], ncols, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
     }
 }
 
 void gather_data(float *W, int blockSize, int ncols, int nrows, int rank, int size)
 {
-    // Use non-blocking communication for gathering data
     if (rank == 0) {
-        MPI_Request *requests = malloc((size - 1) * sizeof(MPI_Request));
-        int req_count = 0;
-
         for (int i = 1; i < size; i++) {
-            int recv_size = (i == size - 1) ? (nrows * ncols - i * blockSize * ncols) : blockSize * ncols;
-            MPI_Irecv(W + i * blockSize * ncols, recv_size, MPI_FLOAT, i, 0, MPI_COMM_WORLD, &requests[req_count++]);
+            if (i != size - 1) {
+                MPI_Recv(W + i * blockSize * ncols, blockSize * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            } else {
+                MPI_Recv(W + i * blockSize * ncols, nrows * ncols - i * blockSize * ncols, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
         }
-
-        MPI_Waitall(req_count, requests, MPI_STATUSES_IGNORE);
-        free(requests);
     } else {
         MPI_Send(W + rank * blockSize * ncols, blockSize * ncols, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
     }
@@ -192,131 +186,115 @@ void gather_data(float *W, int blockSize, int ncols, int nrows, int rank, int si
 
 mnt *darboux(const mnt *restrict m)
 {
-    #if defined(OMP) || defined(MPI)
-    int max_threads = omp_get_max_threads();
-    struct ThreadTiming *thread_timings = malloc(max_threads * sizeof(struct ThreadTiming));
-    for (int i = 0; i < max_threads; i++) {
-        thread_timings[i].time = 0.0;
-        thread_timings[i].thread_id = i;
-    }
-    #endif
+  #if defined(OMP) || defined(MPI)
+  int max_threads = omp_get_max_threads();
+  struct ThreadTiming *thread_timings = malloc(max_threads * sizeof(struct ThreadTiming));
+  for (int i = 0; i < max_threads; i++) {
+      thread_timings[i].time = 0.0;
+      thread_timings[i].thread_id = i;
+  }
+  #endif
+
+  #ifdef MPI
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  #endif
+
+  const int ncols = m->ncols, nrows = m->nrows;
+
+  // initialisation
+  float *restrict W, *restrict Wprec;
+  CHECK((W = malloc(ncols * nrows * sizeof(float))) != NULL);
+  Wprec = init_W(m);
+  #ifdef MPI
+  MPI_Bcast(Wprec, ncols * nrows, MPI_FLOAT, 0, MPI_COMM_WORLD);
+  #endif
+
+  // calcul : boucle principale
+  int modif = 1;
+  #ifdef MPI
+  int blockSize = nrows / size;
+  int start = rank * blockSize;
+  int end = (rank == size - 1)? nrows : start + blockSize;
+  #elif defined(OMP)
+  int start = 0;
+  int end = nrows;
+  #endif
+
+  while (modif) {
+      modif = 0;
+
+      #if defined(OMP) || defined(MPI)
+      int tid;
+      double thread_start;
+      #pragma omp parallel private(tid, thread_start)
+      {
+          tid = omp_get_thread_num();
+          thread_start = omp_get_wtime();
+
+          #pragma omp for reduction(|:modif) schedule(dynamic)
+          for (int i = start; i < end; i++) {
+              for (int j = 0; j < ncols; j++) {
+                  modif |= calcul_Wij(W, Wprec, m, i, j);
+              }
+          }
+          
+          double thread_end = omp_get_wtime();
+          thread_timings[tid].time += thread_end - thread_start;
+      }
+      #else
+      // Sequential version
+      for (int i = 0; i < nrows; i++) {
+          for (int j = 0; j < ncols; j++) {
+              modif |= calcul_Wij(W, Wprec, m, i, j);
+          }
+      }
+      #endif
 
     #ifdef MPI
-    int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    exchange_boundaries(W, start, end, ncols, rank, size);
     #endif
 
-    const int ncols = m->ncols, nrows = m->nrows;
+    #ifdef DARBOUX_PPRINT
+    #ifdef MPI
+    if (rank == 0)
+    #endif
+      dpprint();
+    #endif
 
-    float *restrict W;
-    CHECK((W = malloc(ncols * nrows * sizeof(float))) != NULL);
-    float *restrict Wprec = init_W(m);
+    float *tmp = W;
+    W = Wprec;
+    Wprec = tmp;
 
     #ifdef MPI
-    MPI_Bcast(Wprec, ncols * nrows, MPI_FLOAT, 0, MPI_COMM_WORLD);
-    int blockSize = nrows / size;
-    int start = rank * blockSize;
-    int end = (rank == size - 1) ? nrows : start + blockSize;
-    #else
-    int start = 0;
-    int end = nrows;
+    int global_modif = 0;
+    MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+    modif |= global_modif;
     #endif
+  }
 
-    int modif = 1;
-    while (modif) {
-        modif = 0;
+  #ifdef MPI
+  gather_data(W, blockSize, ncols, nrows, rank, size);
+  #endif
 
-        #if defined(OMP) || defined(MPI)
-        int tid;
-        double thread_start;
+  #if defined(OMP) || defined(MPI)
+  // Print thread timing information
+  #ifdef MPI
+  fprintf(stderr, "\nProcess %d Thread Timings:\n", rank);
+  #else
+  fprintf(stderr, "\nThread Timings:\n");
+  #endif
+  for (int i = 0; i < max_threads; i++) {
+      fprintf(stderr, "Thread %d: %.3f seconds\n", thread_timings[i].thread_id, thread_timings[i].time);
+  }
+  free(thread_timings);
+  #endif
 
-        // Process interior points first
-        #pragma omp parallel private(tid, thread_start)
-        {
-            tid = omp_get_thread_num();
-            thread_start = omp_get_wtime();
-
-            // Use guided schedule for better load balancing
-            #pragma omp for reduction(|:modif) schedule(guided, 64)
-            for (int i = start + 1; i < end - 1; i++) {
-                for (int j = 1; j < ncols - 1; j++) {
-                    modif |= calcul_Wij(W, Wprec, m, i, j);
-                }
-            }
-
-            double thread_end = omp_get_wtime();
-            thread_timings[tid].time += thread_end - thread_start;
-        }
-        #else
-        for (int i = start; i < end; i++) {
-            for (int j = 0; j < ncols; j++) {
-                modif |= calcul_Wij(W, Wprec, m, i, j);
-            }
-        }
-        #endif
-
-        #ifdef MPI
-        // Handle boundaries
-        exchange_boundaries(W, start, end, ncols, rank, size);
-
-        // Process boundary points after exchange
-        #pragma omp parallel sections reduction(|:modif)
-        {
-            #pragma omp section
-            if (rank > 0) {
-                for (int j = 0; j < ncols; j++) {
-                    modif |= calcul_Wij(W, Wprec, m, start, j);
-                }
-            }
-
-            #pragma omp section
-            if (rank < size - 1) {
-                for (int j = 0; j < ncols; j++) {
-                    modif |= calcul_Wij(W, Wprec, m, end - 1, j);
-                }
-            }
-        }
-
-        // Global reduction
-        int global_modif;
-        MPI_Allreduce(&modif, &global_modif, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
-        modif = global_modif;
-        #endif
-
-        #ifdef DARBOUX_PPRINT
-        #ifdef MPI
-        if (rank == 0)
-        #endif
-            dpprint();
-        #endif
-
-        // Swap buffers
-        float *tmp = W;
-        W = Wprec;
-        Wprec = tmp;
-    }
-
-    #ifdef MPI
-    gather_data(W, blockSize, ncols, nrows, rank, size);
-    #endif
-
-    #if defined(OMP) || defined(MPI)
-    #ifdef MPI
-    fprintf(stderr, "\nProcess %d Thread Timings:\n", rank);
-    #else
-    fprintf(stderr, "\nThread Timings:\n");
-    #endif
-    for (int i = 0; i < max_threads; i++) {
-        fprintf(stderr, "Thread %d: %.3f seconds\n", thread_timings[i].thread_id, thread_timings[i].time);
-    }
-    free(thread_timings);
-    #endif
-
-    free(Wprec);
-    mnt *res;
-    CHECK((res = malloc(sizeof(*res))) != NULL);
-    memcpy(res, m, sizeof(*res));
-    res->terrain = W;
-    return res;
+  free(Wprec);
+  mnt *res;
+  CHECK((res = malloc(sizeof(*res))) != NULL);
+  memcpy(res, m, sizeof(*res));
+  res->terrain = W;
+  return res;
 }
