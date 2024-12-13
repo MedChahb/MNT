@@ -85,7 +85,13 @@ int main(int argc, char **argv)
   fprintf(stderr, "\nTotal execution time: %.3f seconds\n", execution_time);
   
   #if defined(OMP) || defined(MPI)
-  fprintf(stderr, "Speedup: %.2fx\n", SEQ_EXEC_TIME_LARGE / execution_time);
+  if (strstr(argv[1], "large")) {
+      fprintf(stderr, "Speedup: %.2fx\n", SEQ_EXEC_TIME_LARGE / execution_time);
+  } else if (strstr(argv[1], "medium")) {
+      fprintf(stderr, "Speedup: %.2fx\n", SEQ_EXEC_TIME_MEDIUM / execution_time);
+  } else {
+      fprintf(stderr, "Speedup with small tests ??\n");
+  }
   #endif
 
   #ifdef MPI
