@@ -52,17 +52,21 @@ float *init_W(const mnt *restrict m) {
 #ifdef DARBOUX_PPRINT
 float min_darboux = 9999.; // ça ira bien, c'est juste de l'affichage
 int iter_darboux = 0;
+int printed = 0; // Avec MPI, on print plusieurs newLines indésirables
 // fonction d'affichage de la progression
 void dpprint() {
     if (min_darboux != 9999.) {
         fprintf(stderr, "%.3f %d\r", min_darboux, iter_darboux++);
         fflush(stderr);
         min_darboux = 9999.;
-    } else {
-        fprintf(stderr, "\n");
+        printed = 1; 
+    } else if (printed) {
+        fprintf(stderr, "\n"); // Print newLine une seule fois
+        printed = 0; // Reset flag
     }
 }
 #endif
+
 
 // pour parcourir les 8 voisins :
 const int VOISINS[8][2] = {
