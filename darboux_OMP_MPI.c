@@ -152,7 +152,7 @@ mnt *darboux(const mnt *restrict m) {
 
     MPI_Bcast(Wprec, nrows * ncols, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-    int global_modif = 1;
+    int global_modif = 1; 
     while (global_modif) {
         int local_modif = 0;
 
