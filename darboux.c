@@ -145,9 +145,10 @@ int calcul_Wij(float *restrict W, const float *restrict Wprec, const mnt *m, con
 }
 
 /*****************************************************************************/
-/*           Fonction de calcul principale - À PARALLÉLISER                  */
+/*           Fonction de calcul principale - PARALLÉLISÉE                    */
 /*****************************************************************************/
-// applique l'algorithme de Darboux sur le MNT m, pour calculer un nouveau MNT
+// échange les frontières des blocs entre les processus MPI
+// chaque processus envoie et reçoit des lignes adjacentes à ses voisins
 #ifdef MPI
 void exchange_boundaries(float *W, int start, int end, int ncols, int rank, int size)
 {
@@ -175,6 +176,8 @@ void exchange_boundaries(float *W, int start, int end, int ncols, int rank, int 
         }
 }
 
+// rassemble les résultats calculés par chaque processus MPI dans le processus maître (rank 0)
+// chaque processus envoie ses données au processus 0, qui les reconstitue
 void gather_data(float *W, int blockSize, int ncols, int nrows, int rank, int size)
 {
     int start = rank * blockSize;
@@ -197,6 +200,8 @@ void gather_data(float *W, int blockSize, int ncols, int nrows, int rank, int si
 }
 #endif
 
+// applique l'algorithme de Darboux sur un MNT donné
+// prend un modèle numérique de terrain (mnt) en entrée et retourne le MNT transformé
 mnt *darboux(const mnt *restrict m)
 {
   #if defined(OMP) || defined(MPI)
@@ -216,7 +221,7 @@ mnt *darboux(const mnt *restrict m)
 
   const int ncols = m->ncols, nrows = m->nrows;
 
-  // initialisation
+  // initialisation des tableaux W et Wprec
   float *restrict W, *restrict Wprec;
   CHECK((W = malloc(ncols * nrows * sizeof(float))) != NULL);
   Wprec = init_W(m);
