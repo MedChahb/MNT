@@ -21,11 +21,11 @@ Note that the executable file has arguments, input filename and output filename,
     
         - To run this version naively (1 thread - 1 process):
         ```bash
-        mpirun ./exec_name .
+        mpirun ./exec_name
         ```
         - If you want to run this version across multiple machines (nodes) listed in a file `host.txt` use :
         ```bash
-        mpirun mpirun -hostfile host.txt
+        mpirun -hostfile host.txt ./exec_name
         ```
         example of a host.txt file :
         ```
