@@ -43,4 +43,4 @@ Note that the executable file has arguments, input filename and output filename,
         [Read the documentation for more...](https://docs.open-mpi.org/en/main/man-openmpi/man1/mpirun.1.html)
 
 
-[More infos and performance tests on input/ data.](https://git.unistra.fr/chahbaoui/M1S1-2425-Projet2-MNT/-/blob/main/README.pdf?ref_type=heads)
+[More infos and performance tests on input/ data.](https://github.com/MedChahb/MNT/blob/main/README.pdf)
