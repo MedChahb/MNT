@@ -1,3 +1,5 @@
+# Parallelized MNT
+First of all, clone this repo.
 ## Compilation
 Compile files using `make` command.
 
